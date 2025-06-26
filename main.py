@@ -4,7 +4,7 @@ import requests
 import pytz
 import sys
 
-BOT_TOKEN = "7798265687:AAG1HqZBNYx4GBZZ5jC5cP3MTt8wsvtjQGE"
+BOT_TOKEN = "8011344779:AAHIw8vYSNB-wYmbRNBz0GiDKAfehRiIhQk"
 CHAT_ID   = "1654334233"
 
 FUTURES_PAIRS = ["btcusdt", "etcusdt"]
