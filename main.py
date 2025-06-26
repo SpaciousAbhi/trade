@@ -1,6 +1,7 @@
 import time
 import datetime
 import requests
+import pytz
 import sys
 
 # ─── YOUR CREDENTIALS ─────────────────────────────────────────────────────────
@@ -22,26 +23,27 @@ def send_msg(msg):
         print(f"Failed to send message: {e}")
 
 def get_formatted_time():
-    now = datetime.datetime.now()
-    return now.strftime('%I:%M %p')  # e.g. 02:43 PM
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.datetime.now(ist)
+    return now_ist.strftime('%I:%M %p')  # e.g. 01:13 PM
 
 def loop():
     last_sent = None
     while True:
-        now = datetime.datetime.now()
-        minute = now.minute
-        second = now.second
-        # Trigger at :13, :28, :43, :58 exactly at second 0
+        utc_now = datetime.datetime.utcnow()
+        minute = utc_now.minute
+        second = utc_now.second
+        # Use UTC clock to determine trigger time, since Heroku runs on UTC
         if minute % 15 in (13, 28, 43, 58) and second == 0:
-            stamp = now.strftime('%Y-%m-%d %H:%M')
-            if stamp != last_sent:
+            timestamp = utc_now.strftime('%Y-%m-%d %H:%M')
+            if timestamp != last_sent:
                 msg = (
                     "⚠️ 15-minute candle closing soon\n"
                     f"🕒 Time: {get_formatted_time()}\n"
                     "📌 Check chart & prepare trade"
                 )
                 send_msg(msg)
-                last_sent = stamp
+                last_sent = timestamp
                 time.sleep(60)  # avoid duplicates
         time.sleep(1)
 
