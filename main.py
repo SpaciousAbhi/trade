@@ -4,11 +4,13 @@ import requests
 import pytz
 import sys
 
+# ─── YOUR TELEGRAM CREDENTIALS ─────────────────────────────────────
 BOT_TOKEN = "8011344779:AAHIw8vYSNB-wYmbRNBz0GiDKAfehRiIhQk"
 CHAT_ID   = "1654334233"
+# ──────────────────────────────────────────────────────────────────
 
 FUTURES_PAIRS = ["btcusdt", "etcusdt"]
-TIMEFRAME = "15m"
+TIMEFRAME = "30m"
 BINANCE_API = "https://fapi.binance.com"
 
 def send_msg(msg):
@@ -26,7 +28,7 @@ def get_formatted_time():
     return now_ist.strftime('%I:%M %p')
 
 def get_candles(symbol):
-    url = f"{BINANCE_API}/fapi/v1/klines?symbol={symbol.upper()}&interval=15m&limit=3"
+    url = f"{BINANCE_API}/fapi/v1/klines?symbol={symbol.upper()}&interval=30m&limit=3"
     try:
         res = requests.get(url)
         data = res.json()
@@ -68,38 +70,40 @@ def check_engulfing_patterns():
         if is_bullish_engulfing(prev, curr):
             msg = f"""🟢 Bullish Engulfing Detected
 Pair: {symbol.upper()}-PERP
-TF: 15m
+TF: 30m
 🕒 Time: {time_str}
 📈 Price: {price} USDT"""
             send_msg(msg)
         elif is_bearish_engulfing(prev, curr):
             msg = f"""🔴 Bearish Engulfing Detected
 Pair: {symbol.upper()}-PERP
-TF: 15m
+TF: 30m
 🕒 Time: {time_str}
 📉 Price: {price} USDT"""
             send_msg(msg)
 
 def loop():
-    last_sent = None
+    last_msg_time = None
     while True:
         now = datetime.datetime.utcnow()
         minute = now.minute
         second = now.second
 
-        if minute % 15 in (13, 28, 43, 58) and second == 0:
+        # ⏰ Pre-close alert at :25 and :55
+        if minute in (25, 55) and second == 0:
             timestamp = now.strftime('%Y-%m-%d %H:%M')
-            if timestamp != last_sent:
+            if timestamp != last_msg_time:
                 msg = (
-                    "⚠️ 15-minute candle closing soon\n"
+                    "⚠️ 30-minute candle closing soon\n"
                     f"🕒 Time: {get_formatted_time()}\n"
                     "📌 Check chart & prepare trade"
                 )
                 send_msg(msg)
-                last_sent = timestamp
+                last_msg_time = timestamp
                 time.sleep(60)
 
-        if minute % 15 == 0 and second == 5:
+        # 🧠 Pattern check at every :00 and :30
+        if minute in (0, 30) and second == 5:
             check_engulfing_patterns()
             time.sleep(5)
 
