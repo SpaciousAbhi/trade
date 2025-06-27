@@ -1,2 +1,5 @@
 requests
 pytz
+asyncio
+python-telegram-bot
+playwright
