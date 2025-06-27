@@ -1,140 +1,174 @@
-# main.py (Fully Integrated Inline UI + Pattern Detection + Screenshot Bot)
+# main.py — Real Binance Pattern Detection + Multi-User Bot
 
-import os
-import time
-import json
-import datetime
-import threading
-import requests
-import pytz
-import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Bot
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
-from playwright.async_api import async_playwright
+import json, time, requests, logging
+from datetime import datetime
+from pytz import timezone
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler
 
-# =======================
-# CONFIGURATION
-# =======================
-BOT_TOKEN = "8011344779:AAHIw8vYSNBz0GiDKAfehRiIhQk"
-CHAT_ID = "1654334233"
+# =====================
+# CONFIG
+# =====================
+TOKEN = "8011344779:AAHIw8vYSNB-wYmbRNBz0GiDKAfehRiIhQk"
+TIMEZONE = timezone("Asia/Kolkata")
 STATE_FILE = "state.json"
-ALERTS_FILE = "last_alerts.json"
-TIMEZ = pytz.timezone("Asia/Kolkata")
-BINANCE_API = "https://fapi.binance.com"
-TV_BASE = "https://www.tradingview.com/chart/"
+USERS_FILE = "users.json"
+BINANCE_URL = "https://fapi.binance.com/fapi/v1/klines"
 
-DEFAULT_STATE = {
-    "timeframe": "30m",
-    "pairs": ["btcusdt", "ethusdt"]
-}
+# =====================
+# GLOBAL STATE
+# =====================
+state = {"timeframe": "30m", "pairs": ["btcusdt", "ethusdt"]}
+try:
+    with open(STATE_FILE) as f:
+        state = json.load(f)
+except: pass
 
-# =======================
-# UTILITIES
-# =======================
-def load_state():
-    if not os.path.exists(STATE_FILE): save_state(DEFAULT_STATE)
-    with open(STATE_FILE, 'r') as f: return json.load(f)
+users = []
+try:
+    with open(USERS_FILE) as f:
+        users = json.load(f)
+except: pass
 
-def save_state(state):
-    with open(STATE_FILE, 'w') as f: json.dump(state, f, indent=2)
+logging.basicConfig(level=logging.INFO)
+
+# =====================
+# HELPERS
+# =====================
+def save_state():
+    with open(STATE_FILE, "w") as f: json.dump(state, f)
+
+def save_users():
+    with open(USERS_FILE, "w") as f: json.dump(users, f)
 
 def get_time():
-    return datetime.datetime.now(TIMEZ).strftime("%I:%M %p")
+    return datetime.now(TIMEZONE).strftime("%I:%M %p")
 
-def send_msg(text):
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": CHAT_ID, "text": text})
+def send_all(text):
+    for uid in users:
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/sendMessage", params={
+            "chat_id": uid,
+            "text": text,
+            "parse_mode": "HTML"
+        })
 
-def save_alert(sym, msg):
-    data = {}
-    if os.path.exists(ALERTS_FILE):
-        with open(ALERTS_FILE) as f: data = json.load(f)
-    data.setdefault(sym, []).append(msg)
-    with open(ALERTS_FILE, 'w') as f: json.dump(data, f, indent=2)
+def send_chart(uid, caption, pair):
+    chart_url = f"https://in.tradingview.com/symbols/{pair.upper()}P/"
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/sendPhoto", params={
+        "chat_id": uid,
+        "photo": chart_url,
+        "caption": caption,
+        "parse_mode": "HTML"
+    })
 
-def fetch_candles(sym, tf):
-    url = f"{BINANCE_API}/fapi/v1/klines?symbol={sym.upper()}&interval={tf}&limit=3"
-    res = requests.get(url).json()
-    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4])} for c in res]
+# =====================
+# PATTERN DETECTION
+# =====================
+def fetch_candles(pair, tf="30m"):
+    url = f"{BINANCE_URL}?symbol={pair.upper()}&interval={tf}&limit=3"
+    data = requests.get(url).json()
+    return [{"open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4])} for c in data]
 
-def is_bullish(p,c): return p['close']<p['open'] and c['close']>c['open'] and c['open']<p['close'] and c['close']>p['open']
-def is_bearish(p,c): return p['close']>p['open'] and c['close']<c['open'] and c['open']>p['close'] and c['close']<p['open']
+def is_bullish(p,c): return p['close'] < p['open'] and c['close'] > c['open'] and c['open'] < p['close'] and c['close'] > p['open']
+def is_bearish(p,c): return p['close'] > p['open'] and c['close'] < c['open'] and c['open'] > p['close'] and c['close'] < p['open']
 def is_doji(c): return abs(c['close']-c['open']) <= 0.1*(c['high']-c['low'])
 def is_hammer(c):
-    body=abs(c['close']-c['open'])
-    lw=min(c['open'],c['close'])-c['low']
-    uw=c['high']-max(c['open'],c['close'])
-    return lw>=2*body and uw<body
-
-async def screenshot(symbol, caption):
-    async with async_playwright() as p:
-        b = await p.chromium.launch(args=["--no-sandbox"])
-        pg = await b.new_page(viewport={"width":1280,"height":720})
-        url = f"{TV_BASE}?symbol=BINANCE:{symbol.upper()}&interval=30"
-        await pg.goto(url)
-        await pg.wait_for_selector("canvas", timeout=15000)
-        img = await pg.screenshot(type="png")
-        await b.close()
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data={"chat_id": CHAT_ID, "caption": caption}, files={"photo": (f"{symbol}.png", img, "image/png")})
+    body = abs(c['close'] - c['open'])
+    lw = min(c['open'], c['close']) - c['low']
+    uw = c['high'] - max(c['open'], c['close'])
+    return lw >= 2 * body and uw < body
 
 def check_patterns():
-    state = load_state()
-    for sym in state['pairs']:
-        tf = state['timeframe']
-        data = fetch_candles(sym, tf)
-        if len(data)<3: continue
-        p,c = data[-2], data[-1]
-        now, price = get_time(), c['close']
-        if is_bullish(p,c):
-            cap = f"🟢 Bullish Engulfing\n{sym.upper()} {tf}\n🕒 {now}\n📈 {price}"
-            send_msg(cap); save_alert(sym, cap)
-            asyncio.run(screenshot(sym, cap))
-        elif is_bearish(p,c):
-            cap = f"🔴 Bearish Engulfing\n{sym.upper()} {tf}\n🕒 {now}\n📉 {price}"
-            send_msg(cap); save_alert(sym, cap)
-            asyncio.run(screenshot(sym, cap))
-        elif is_doji(c):
-            cap = f"⚪ Doji\n{sym.upper()} {tf}\n🕒 {now}\n💹 {price}"
-            send_msg(cap); save_alert(sym, cap)
-            asyncio.run(screenshot(sym, cap))
-        elif is_hammer(c):
-            cap = f"🔨 Hammer\n{sym.upper()} {tf}\n🕒 {now}\n💥 {price}"
-            send_msg(cap); save_alert(sym, cap)
-            asyncio.run(screenshot(sym, cap))
+    for pair in state["pairs"]:
+        try:
+            data = fetch_candles(pair)
+            p, c = data[-2], data[-1]
+            now = get_time()
+            price = c['close']
+            caption = None
+            if is_bullish(p, c):
+                caption = f"🟢 Bullish Engulfing\n<b>{pair.upper()}</b> 30m\n🕒 {now} | 📈 {price}"
+            elif is_bearish(p, c):
+                caption = f"🔴 Bearish Engulfing\n<b>{pair.upper()}</b> 30m\n🕒 {now} | 📉 {price}"
+            elif is_doji(c):
+                caption = f"⚪ Doji\n<b>{pair.upper()}</b> 30m\n🕒 {now} | 💹 {price}"
+            elif is_hammer(c):
+                caption = f"🔨 Hammer\n<b>{pair.upper()}</b> 30m\n🕒 {now} | 💥 {price}"
 
-# =======================
-# TELEGRAM MENU + COMMANDS
-# =======================
-from telegram import BotCommand
-from telegram.constants import ParseMode
+            if caption:
+                for uid in users:
+                    send_chart(uid, caption, pair)
+        except Exception as e:
+            logging.error(f"Error checking {pair}: {e}")
 
-# (same inline menu functions from before — unchanged)
-# append below:
+# =====================
+# TELEGRAM COMMANDS
+# =====================
+def start(update: Update, context: CallbackContext):
+    uid = update.effective_chat.id
+    if uid not in users:
+        users.append(uid)
+        save_users()
+    kb = [[
+        InlineKeyboardButton("📸 Screenshot BTC", callback_data='screenshot_btcusdt'),
+        InlineKeyboardButton("➕ Add Pair", callback_data='add_pair')
+    ],[
+        InlineKeyboardButton("⏱ Set Timeframe", callback_data='set_time'),
+        InlineKeyboardButton("📊 Summary", callback_data='summary')
+    ]]
+    update.message.reply_text("🤖 Bot active. Choose an option:", reply_markup=InlineKeyboardMarkup(kb))
 
-def run_loop():
-    last = None
-    while True:
-        now = datetime.datetime.utcnow()
-        m, s = now.minute, now.second
-        if m in (25,55) and s == 0:
-            k = now.strftime("%Y-%m-%d %H:%M")
-            if k != last:
-                send_msg(f"⚠️ 30m candle closing soon\n🕒 {get_time()}\n📌 Check trade")
-                last = k
-                time.sleep(60)
-        if m in (0,30) and s == 5:
-            check_patterns()
-            time.sleep(10)
-        time.sleep(1)
+def button(update: Update, context: CallbackContext):
+    query = update.callback_query
+    cmd = query.data
+    query.answer()
+    if cmd == 'screenshot_btcusdt':
+        send_chart(query.message.chat_id, "🖼 BTCUSDT Chart", "btcusdt")
+    elif cmd == 'summary':
+        send_msg("📊 Summary feature coming soon.")
+    elif cmd == 'add_pair':
+        send_msg("Use /addpair <symbol> to add pair.")
+    elif cmd == 'set_time':
+        send_msg("Use /settime <interval> e.g. 30m")
 
-def main():
-    threading.Thread(target=run_loop, daemon=True).start()
-    updater = Updater(BOT_TOKEN, use_context=True)
+def addpair(update: Update, context: CallbackContext):
+    if context.args:
+        pair = context.args[0].lower()
+        if pair not in state['pairs']:
+            state['pairs'].append(pair)
+            save_state()
+            update.message.reply_text(f"✅ Tracking {pair.upper()}")
+        else:
+            update.message.reply_text(f"⚠️ {pair.upper()} already tracked")
+
+def settime(update: Update, context: CallbackContext):
+    if context.args:
+        tf = context.args[0]
+        state['timeframe'] = tf
+        save_state()
+        update.message.reply_text(f"⏱ Timeframe set to {tf}")
+
+def list_users(update: Update, context: CallbackContext):
+    update.message.reply_text(f"👥 Total Users: {len(users)}\n{chr(10).join(map(str, users))}")
+
+# =====================
+# MAIN LOOP
+# =====================
+def run_bot():
+    updater = Updater(TOKEN)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("addpair", add_pair_command))
-    dp.add_handler(CallbackQueryHandler(menu_handler))
+    dp.add_handler(CommandHandler("addpair", addpair))
+    dp.add_handler(CommandHandler("settime", settime))
+    dp.add_handler(CommandHandler("users", list_users))
+    dp.add_handler(CallbackQueryHandler(button))
     updater.start_polling()
-    updater.idle()
+    send_all(f"🔁 Bot restarted at {get_time()}")
+    while True:
+        now = datetime.now(TIMEZONE)
+        if now.minute in [0,30]: check_patterns()
+        if now.minute in [25,55]: send_all(f"⚠️ 30m candle closing soon\n🕒 {get_time()}\n📌 Check chart & prepare trade")
+        time.sleep(60)
 
 if __name__ == '__main__':
-    main()
+    run_bot()
