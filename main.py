@@ -1,144 +1,136 @@
+import os
+import sys
 import time
 import datetime
 import requests
 import pytz
-import sys
 import threading
+import asyncio
+from playwright.async_api import async_playwright
 
-# ─── YOUR TELEGRAM CREDENTIALS ─────────────────────────────────────
+# ─── YOUR CREDENTIALS ────────────────────────────────────────────────────────
 BOT_TOKEN = "8011344779:AAHIw8vYSNB-wYmbRNBz0GiDKAfehRiIhQk"
 CHAT_ID   = "1654334233"
-# ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 
-FUTURES_PAIRS = ["btcusdt", "etcusdt"]
-TIMEFRAME = "30m"
-BINANCE_API = "https://fapi.binance.com"
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Bot config
+FUTURES_PAIRS = ["btcusdt", "ethusdt"]
+TIMEFRAME     = "30m"
+BINANCE_API   = "https://fapi.binance.com"
+TELEGRAM_API  = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TV_URL        = "https://www.tradingview.com/chart/"
 
-def send_msg(msg):
-    url = f"{TELEGRAM_API}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
-    try:
-        r = requests.post(url, data=data)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"Failed to send message: {e}")
+def send_msg(text: str):
+    requests.post(f"{TELEGRAM_API}/sendMessage", data={
+        "chat_id": CHAT_ID,
+        "text": text
+    })
+
+def send_chart(symbol: str, caption: str):
+    """Launch headless browser, take chart screenshot, send via Telegram."""
+    async def _screenshot():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=["--no-sandbox"])
+            page = await browser.new_page(viewport={"width":1280,"height":720})
+            url = f"{TV_URL}?symbol=BINANCE:{symbol.upper()}&interval={TIMEFRAME}"
+            await page.goto(url)
+            # wait for chart canvas to load
+            await page.wait_for_selector("canvas", timeout=15000)
+            img_bytes = await page.screenshot(type="png")
+            await browser.close()
+            return img_bytes
+
+    img = asyncio.run(_screenshot())
+    # send as photo
+    files = {"photo": (f"{symbol}.png", img, "image/png")}
+    data = {"chat_id": CHAT_ID, "caption": caption}
+    requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files)
 
 def get_formatted_time():
-    ist = pytz.timezone('Asia/Kolkata')
-    now_ist = datetime.datetime.now(ist)
-    return now_ist.strftime('%I:%M %p')
+    ist = pytz.timezone("Asia/Kolkata")
+    return datetime.datetime.now(ist).strftime("%I:%M %p")
 
-def get_candles(symbol):
-    url = f"{BINANCE_API}/fapi/v1/klines?symbol={symbol.upper()}&interval={TIMEFRAME}&limit=3"
-    try:
-        res = requests.get(url)
-        data = res.json()
-        return [{
-            "open": float(c[1]),
-            "high": float(c[2]),
-            "low": float(c[3]),
-            "close": float(c[4])
-        } for c in data]
-    except Exception as e:
-        print(f"Error fetching candles for {symbol}: {e}")
-        return []
+def fetch_candles(sym):
+    url = f"{BINANCE_API}/fapi/v1/klines?symbol={sym.upper()}&interval={TIMEFRAME}&limit=3"
+    res = requests.get(url).json()
+    return [{"open":float(c[1]),"high":float(c[2]),"low":float(c[3]),"close":float(c[4])} for c in res]
 
-def is_bullish_engulfing(prev, curr):
-    return (
-        prev["close"] < prev["open"] and
-        curr["close"] > curr["open"] and
-        curr["open"] < prev["close"] and
-        curr["close"] > prev["open"]
-    )
+def is_bullish_engulfing(p,c): return p["close"]<p["open"] and c["close"]>c["open"] and c["open"]<p["close"] and c["close"]>p["open"]
+def is_bearish_engulfing(p,c): return p["close"]>p["open"] and c["close"]<c["open"] and c["open"]>p["close"] and c["close"]<p["open"]
+def is_doji(c):
+    body=abs(c["close"]-c["open"]); rng=c["high"]-c["low"]
+    return body<=0.1*rng
+def is_hammer(c):
+    body=abs(c["close"]-c["open"])
+    low_wick=min(c["open"],c["close"])-c["low"]
+    up_wick=c["high"]-max(c["open"],c["close"])
+    return low_wick>=2*body and up_wick<body
 
-def is_bearish_engulfing(prev, curr):
-    return (
-        prev["close"] > prev["open"] and
-        curr["close"] < curr["open"] and
-        curr["open"] > prev["close"] and
-        curr["close"] < prev["open"]
-    )
-
-def check_engulfing_patterns():
-    for symbol in FUTURES_PAIRS:
-        candles = get_candles(symbol)
-        if len(candles) < 3:
-            continue
-        prev = candles[-2]
-        curr = candles[-1]
-        time_str = get_formatted_time()
+def check_patterns():
+    for sym in FUTURES_PAIRS:
+        candles = fetch_candles(sym)
+        if len(candles)<3: continue
+        prev, curr = candles[-2], candles[-1]
+        now = get_formatted_time()
         price = curr["close"]
-        if is_bullish_engulfing(prev, curr):
-            msg = f"""🟢 Bullish Engulfing Detected
-Pair: {symbol.upper()}-PERP
-TF: {TIMEFRAME}
-🕒 Time: {time_str}
-📈 Price: {price} USDT"""
-            send_msg(msg)
-        elif is_bearish_engulfing(prev, curr):
-            msg = f"""🔴 Bearish Engulfing Detected
-Pair: {symbol.upper()}-PERP
-TF: {TIMEFRAME}
-🕒 Time: {time_str}
-📉 Price: {price} USDT"""
-            send_msg(msg)
+        if is_bullish_engulfing(prev,curr):
+            cap = f"🟢 Bullish Engulfing\nPair: {sym.upper()}-PERP\nTF: {TIMEFRAME}\n🕒 {now}\n📈 {price} USDT"
+            send_msg(cap)
+            send_chart(sym, cap)
+        elif is_bearish_engulfing(prev,curr):
+            cap = f"🔴 Bearish Engulfing\nPair: {sym.upper()}-PERP\nTF: {TIMEFRAME}\n🕒 {now}\n📉 {price} USDT"
+            send_msg(cap)
+            send_chart(sym, cap)
+        if is_doji(curr):
+            cap = f"⚪ Doji Candle\nPair: {sym.upper()}-PERP\nTF: {TIMEFRAME}\n🕒 {now}\n💹 {price} USDT"
+            send_msg(cap)
+            send_chart(sym, cap)
+        if is_hammer(curr):
+            cap = f"🔨 Hammer Candle\nPair: {sym.upper()}-PERP\nTF: {TIMEFRAME}\n🕒 {now}\n💥 {price} USDT"
+            send_msg(cap)
+            send_chart(sym, cap)
 
-def handle_start_command():
+def handle_start():
     url = f"{TELEGRAM_API}/getUpdates"
-    last_update_id = None
+    last_id=None
     while True:
-        try:
-            res = requests.get(url).json()
-            if "result" in res:
-                for update in res["result"]:
-                    update_id = update["update_id"]
-                    if update_id == last_update_id:
-                        continue
-                    last_update_id = update_id
-                    if "message" in update and "text" in update["message"]:
-                        msg = update["message"]["text"]
-                        chat_id = str(update["message"]["chat"]["id"])
-                        if msg == "/start" and chat_id == CHAT_ID:
-                            reply = (
-                                "✅ Bot is active.\n"
-                                f"🔍 Monitoring Binance Futures pairs: {', '.join(FUTURES_PAIRS).upper()}\n"
-                                f"🕒 Timeframe: {TIMEFRAME}\n"
-                                "📡 Alerts: Engulfing + Pre-candle-close alerts"
-                            )
-                            send_msg(reply)
-        except Exception as e:
-            print(f"Command handler error: {e}")
+        res = requests.get(url).json().get("result",[])
+        for upd in res:
+            uid = upd["update_id"]
+            if uid==last_id: continue
+            last_id=uid
+            msg=upd.get("message",{}).get("text","")
+            cid=str(upd.get("message",{}).get("chat",{}).get("id",""))
+            if msg=="/start" and cid==CHAT_ID:
+                send_msg(
+                    "✅ Bot active.\n"
+                    f"🔍 Monitoring: {','.join(FUTURES_PAIRS).upper()} ({TIMEFRAME})\n"
+                    "⚡ Alerts: Engulfing/Doji/Hammer + charts"
+                )
         time.sleep(3)
 
 def loop():
-    last_msg_time = None
+    last_alert=None
     while True:
-        now = datetime.datetime.utcnow()
-        minute = now.minute
-        second = now.second
+        u = datetime.datetime.utcnow()
+        m,s = u.minute, u.second
 
-        # Pre-close alert at :25 and :55
-        if minute in (25, 55) and second == 0:
-            timestamp = now.strftime('%Y-%m-%d %H:%M')
-            if timestamp != last_msg_time:
-                msg = (
-                    "⚠️ 30-minute candle closing soon\n"
-                    f"🕒 Time: {get_formatted_time()}\n"
-                    "📌 Check chart & prepare trade"
-                )
-                send_msg(msg)
-                last_msg_time = timestamp
+        # pre-close alert
+        if m in (25,55) and s==0:
+            key=u.strftime("%Y-%m-%d %H:%M")
+            if key!=last_alert:
+                send_msg(f"⚠️ 30m candle closing soon\n🕒 {get_formatted_time()}\n📌 Check trade")
+                last_alert=key
                 time.sleep(60)
 
-        # Engulfing check on :00 and :30
-        if minute in (0, 30) and second == 5:
-            check_engulfing_patterns()
+        # pattern check
+        if m in (0,30) and s==5:
+            check_patterns()
             time.sleep(5)
 
         time.sleep(1)
 
-if __name__ == "__main__":
-    send_msg(f"🔄 Bot has started.\n🕒 Time: {get_formatted_time()}\n✅ Engulfing detection + alerts active.")
-    threading.Thread(target=handle_start_command, daemon=True).start()
+if __name__=="__main__":
+    send_msg(f"🔄 Bot started.\n🕒 {get_formatted_time()}\n✅ Monitoring patterns + charts")
+    threading.Thread(target=handle_start,daemon=True).start()
     loop()
