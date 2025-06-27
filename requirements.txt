@@ -1,5 +1,4 @@
 requests
 pytz
-asyncio
-python-telegram-bot
 playwright
+python-telegram-bot==13.15
